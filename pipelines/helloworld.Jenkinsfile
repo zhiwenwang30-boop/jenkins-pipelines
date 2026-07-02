@@ -33,7 +33,7 @@ pipeline {
       steps {
         script {
           def latestCommit = sh(
-            script: "git ls-remote '${env.APP_REPO_URL}' 'refs/heads/${env.APP_BRANCH}' | awk '{print \\$1}'",
+            script: "git ls-remote '${env.APP_REPO_URL}' 'refs/heads/${env.APP_BRANCH}' | cut -f1",
             returnStdout: true
           ).trim()
 
