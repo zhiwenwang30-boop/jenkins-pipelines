@@ -21,7 +21,7 @@ Required Jenkins credentials:
 Trigger mode:
 
 - Jenkins polls `https://github.com/zhiwenwang30-boop/helloworld.git`
-  every minute.
+  every minute with `* * * * *`.
 - If `refs/heads/main` did not change since the last successful build, the
   pipeline skips all build/push stages.
 - If `refs/heads/main` changed, the pipeline checks out that exact commit,
