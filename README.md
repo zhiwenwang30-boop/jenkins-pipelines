@@ -18,11 +18,13 @@ Required Jenkins credentials:
 - `github-push-cred`: GitHub username and personal access token.
 - `dockerhub-cred`: Docker Hub username and access token.
 
-Webhook on the application repository:
+Trigger mode:
 
-- Repository: `https://github.com/zhiwenwang30-boop/helloworld.git`
-- URL: `http://localhost:18080/generic-webhook-trigger/invoke?token=helloworld-ci-token`
-- Event: push
+- Jenkins polls `https://github.com/zhiwenwang30-boop/helloworld.git`
+  every minute.
+- If `refs/heads/main` did not change since the last successful build, the
+  pipeline skips all build/push stages.
+- If `refs/heads/main` changed, the pipeline checks out that exact commit,
+  creates a Git tag, builds the Docker image, and pushes both.
 
-The pipeline only processes pushes to `refs/heads/main`. Tag pushes are ignored
-to avoid creating a trigger loop.
+No public webhook URL is required for the local Jenkins demo environment.
