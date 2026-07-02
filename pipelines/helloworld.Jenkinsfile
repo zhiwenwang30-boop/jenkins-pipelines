@@ -7,17 +7,14 @@ pipeline {
   }
 
   triggers {
-    GenericTrigger(
-      genericVariables: [
-        [key: 'WEBHOOK_REF', value: '$.ref'],
-        [key: 'WEBHOOK_AFTER', value: '$.after']
-      ],
-      causeString: 'Triggered by GitHub push on $WEBHOOK_REF at $WEBHOOK_AFTER',
-      token: 'helloworld-ci-token',
-      printContributedVariables: true,
-      printPostContent: false,
-      regexpFilterText: '$WEBHOOK_REF',
-      regexpFilterExpression: '^refs/heads/main$'
+    cron('H/1 * * * *')
+  }
+
+  parameters {
+    booleanParam(
+      name: 'FORCE_RUN',
+      defaultValue: false,
+      description: 'Run even when the application repository commit did not change.'
     )
   }
 
@@ -32,23 +29,74 @@ pipeline {
   }
 
   stages {
-    stage('Validate Trigger') {
+    stage('Detect App Change') {
       steps {
         script {
-          if (env.WEBHOOK_REF?.trim() && env.WEBHOOK_REF != 'refs/heads/main') {
-            currentBuild.result = 'NOT_BUILT'
-            error("Ignored ref: ${env.WEBHOOK_REF}")
+          def latestCommit = sh(
+            script: "git ls-remote '${env.APP_REPO_URL}' 'refs/heads/${env.APP_BRANCH}' | awk '{print \\$1}'",
+            returnStdout: true
+          ).trim()
+
+          if (!latestCommit) {
+            error("Could not read ${env.APP_BRANCH} from ${env.APP_REPO_URL}.")
+          }
+
+          env.TARGET_APP_COMMIT = latestCommit
+
+          def checkpointFile = '.last-app-commit'
+          def lastBuiltCommit = fileExists(checkpointFile) ? readFile(checkpointFile).trim() : ''
+          def timerCauses = currentBuild.getBuildCauses('hudson.triggers.TimerTrigger$TimerTriggerCause')
+          def isTimerBuild = timerCauses && timerCauses.size() > 0
+          def forceRun = params.FORCE_RUN || !isTimerBuild
+
+          if (!forceRun && !lastBuiltCommit) {
+            env.SHOULD_RUN = 'false'
+            writeFile file: checkpointFile, text: "${latestCommit}\n"
+            currentBuild.displayName = "#${env.BUILD_NUMBER} baseline ${latestCommit.take(7)}"
+            echo "Initialized polling baseline at ${latestCommit}; no pipeline run needed."
+          } else if (!forceRun && lastBuiltCommit == latestCommit) {
+            env.SHOULD_RUN = 'false'
+            currentBuild.displayName = "#${env.BUILD_NUMBER} no app change"
+            echo "No new app commit on ${env.APP_BRANCH}: ${latestCommit}"
+          } else {
+            env.SHOULD_RUN = 'true'
+            echo "Application commit selected for build: ${latestCommit}"
           }
         }
       }
     }
 
+    stage('Preflight Credentials') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
+      steps {
+        withCredentials([
+          usernamePassword(
+            credentialsId: env.GITHUB_CREDENTIALS_ID,
+            usernameVariable: 'GIT_USERNAME',
+            passwordVariable: 'GIT_TOKEN'
+          ),
+          usernamePassword(
+            credentialsId: env.DOCKERHUB_CREDENTIALS_ID,
+            usernameVariable: 'DOCKERHUB_USERNAME',
+            passwordVariable: 'DOCKERHUB_TOKEN'
+          )
+        ]) {
+          echo 'Required GitHub and Docker Hub credentials are configured.'
+        }
+      }
+    }
+
     stage('Checkout App Repo') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           checkout([
             $class: 'GitSCM',
-            branches: [[name: env.WEBHOOK_AFTER?.trim() ? env.WEBHOOK_AFTER : "*/${env.APP_BRANCH}"]],
+            branches: [[name: env.TARGET_APP_COMMIT]],
             userRemoteConfigs: [[
               url: env.APP_REPO_URL,
               credentialsId: env.GITHUB_CREDENTIALS_ID
@@ -62,6 +110,9 @@ pipeline {
     }
 
     stage('Prepare Version') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           script {
@@ -77,6 +128,9 @@ pipeline {
     }
 
     stage('Static Code Scan') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           sh '''
@@ -93,6 +147,9 @@ pipeline {
     }
 
     stage('Build Docker Image') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           sh '''
@@ -104,6 +161,9 @@ pipeline {
     }
 
     stage('Run Smoke Test') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         sh '''
           output="$(docker run --rm "${IMAGE_VERSION}")"
@@ -114,6 +174,9 @@ pipeline {
     }
 
     stage('Create Git Tag') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           sh '''
@@ -131,6 +194,9 @@ pipeline {
     }
 
     stage('Push Git Tag') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         dir(env.APP_DIR) {
           withCredentials([
@@ -152,6 +218,9 @@ pipeline {
     }
 
     stage('Push Docker Image') {
+      when {
+        expression { env.SHOULD_RUN == 'true' }
+      }
       steps {
         withCredentials([
           usernamePassword(
@@ -172,7 +241,14 @@ pipeline {
 
   post {
     success {
-      echo "Pipeline success: ${VERSION_TAG} was tagged and pushed."
+      script {
+        if (env.SHOULD_RUN == 'true') {
+          writeFile file: '.last-app-commit', text: "${env.TARGET_APP_COMMIT}\n"
+          echo "Pipeline success: ${env.VERSION_TAG} was tagged and pushed."
+        } else {
+          echo 'Pipeline skipped because the application repository did not change.'
+        }
+      }
     }
     failure {
       echo 'Pipeline failed. Check the failed stage logs.'
